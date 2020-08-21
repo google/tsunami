@@ -24,3 +24,5 @@ In this case, the fileNames variable will hold an array of strings which are
 the names of the files within the tar archive.
 
 The only input the class needs is a ustar format tar file.
+
+This is not an officially supported Google product.
