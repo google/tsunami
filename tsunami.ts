@@ -1,11 +1,32 @@
 /**
  * @license
  *
- * Copyright 2020 Google LLC
- * Use of this source code is governed by an MIT-style
- * license that can be found in the LICENSE file or at
- * https://opensource.org/licenses/MIT.
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2015 Sebastian Jørgensen
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
  */
+
+import GoogPromise from 'goog:goog.Promise'; // from //javascript/closure/promise
+import {assert, assertInstanceof} from 'google3/javascript/typescript/contrib/assert';
 
 /** Uncompressed file extracted from .tar */
 export interface UncompressedFile {
@@ -29,6 +50,8 @@ const GNAME_LENGTH = 32;
 const DEVMAJOR_LENGTH = 8;
 const DEVMINOR_LENGTH = 8;
 const NAMEPREFIX_LENGTH = 155;
+const HEADER_SIZE = 512;
+const CACHE_SIZE = 500000000;
 
 function isValidName(fileName: string) {
   return (fileName !== '' && fileName !== '.');
@@ -155,7 +178,7 @@ export class PaxHeader {
       if (fieldValue.length === 0) {
         fieldNum = 0;
       } else if (fieldValue.match(/^\d+$/) !== null) {
-        // If it's an integer field, parse it as int
+        // If it's a integer field, parse it as int
         fieldNum = Number(fieldValue);
       }
       let field = null;
@@ -290,9 +313,7 @@ export class UntarFileStream {
 
     const dataBeginPos = stream.position;
     // Assert that this is a ustar tar file.
-    if (!(this.file.ustarFormat.indexOf('ustar') > -1)) {
-      throw new Error('file is not in ustar format');
-    }
+    assert(this.file.ustarFormat.indexOf('ustar') > -1);
     // Then we can safely read the contents of the file.
     this.file.buffer = stream.readBuffer(stream.size());
 
@@ -313,10 +334,12 @@ export class UntarFileStream {
         this.file.buffer = stream.readBuffer(this.file.size);
         break;
       case '1':  // Link to another file already archived
+        // TODO Should we do anything with these?
         break;
       case '2':  // Symbolic link
+        // TODO Should we do anything with these?
         break;
-      case '3':  // Character special device
+      case '3':  // Character special device (what does this mean??)
         break;
       case '4':  // Block special device
         break;
@@ -397,10 +420,6 @@ export interface TarFile {
 
 /** Class for calling FileReader, slicing the file, and untarring. */
 export class Tsunami {
-  // We want to read the header first, which is 512 bytes.
-  readonly headerSize = 512;
-  // Read in 500 MB at a time.
-  readonly cacheSize = 500000000;
   files: UncompressedFile[];
   fileNames: string[];
   cache: Blob;
@@ -439,7 +458,7 @@ export class Tsunami {
 
   private readFileAsArrayBuffer(inputBlob: Blob) {
     const fileReader = new FileReader();
-    return new Promise<ArrayBuffer>((resolve, reject) => {
+    return new GoogPromise((resolve, reject) => {
       fileReader.onerror = () => {
         fileReader.abort();
         reject();
@@ -470,16 +489,15 @@ export class Tsunami {
     let needsHeader = true;
     while (fileOffset < file.size) {
       let cacheOffset = 0;
-      // Read cacheSize amount at a time.
-      if (file.size - fileOffset >= this.cacheSize) {
-        this.slice = file.slice(fileOffset, fileOffset + this.cacheSize);
+      // Read CACHE_SIZE amount at a time.
+      if (file.size - fileOffset >= CACHE_SIZE) {
+        this.slice = file.slice(fileOffset, fileOffset + CACHE_SIZE);
       } else {
         this.slice = file.slice(fileOffset, file.size);
       }
       fileOffset += this.slice.size;
       if (this.buffer.byteLength > 0) {
-        const buffer: ArrayBuffer =
-            await this.readFileAsArrayBuffer(this.slice);
+        const buffer = await this.readFileAsArrayBuffer(this.slice);
         const bufferLength: number = buffer.byteLength;
         const mergeArrays =
             new Uint8Array(this.buffer.byteLength + bufferLength);
@@ -490,13 +508,13 @@ export class Tsunami {
         this.cache = this.slice;
         this.buffer = await this.readFileAsArrayBuffer(this.cache);
       }
-      while (this.buffer.byteLength - cacheOffset >= this.headerSize) {
+      while (this.buffer.byteLength - cacheOffset >= HEADER_SIZE) {
         if (needsHeader) {
           const headerBuffer =
-              this.buffer.slice(cacheOffset, cacheOffset + this.headerSize);
+              this.buffer.slice(cacheOffset, cacheOffset + HEADER_SIZE);
           const stream = new UntarStream(headerBuffer);
           this.header = makeTarFile(stream, this.validFileTypes);
-          cacheOffset += this.headerSize;
+          cacheOffset += HEADER_SIZE;
         }
         needsHeader = true;
         if (this.excludeInvalidFiles && isValidName(this.header.name)) {
@@ -536,7 +554,8 @@ export class Tsunami {
           break;
         }
         if (this.header.size > 0 && !isNaN(this.header.size)) {
-          cacheOffset += this.header.size + (512 - (this.header.size % 512));
+          cacheOffset +=
+              Math.ceil(this.header.size / HEADER_SIZE) * HEADER_SIZE;
         }
       }
       const buffer = this.buffer.slice(cacheOffset, this.buffer.byteLength);
