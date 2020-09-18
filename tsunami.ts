@@ -429,7 +429,8 @@ export class Tsunami {
 
   constructor(
       readonly validFileTypes: RegExp[],
-      readonly excludeInvalidFiles: boolean = false) {
+      readonly excludeInvalidFiles: boolean = false,
+      readonly cacheSize = CACHE_SIZE) {
     this.files = [];
     this.fileNames = [];
     this.cache = new Blob([]);
@@ -489,9 +490,9 @@ export class Tsunami {
     let needsHeader = true;
     while (fileOffset < file.size) {
       let cacheOffset = 0;
-      // Read CACHE_SIZE amount at a time.
-      if (file.size - fileOffset >= CACHE_SIZE) {
-        this.slice = file.slice(fileOffset, fileOffset + CACHE_SIZE);
+      // Read cache size amount at a time.
+      if (file.size - fileOffset >= this.cacheSize) {
+        this.slice = file.slice(fileOffset, fileOffset + this.cacheSize);
       } else {
         this.slice = file.slice(fileOffset, file.size);
       }
