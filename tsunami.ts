@@ -24,13 +24,13 @@
  * SOFTWARE.
  *
  */
-import GoogPromise from 'goog:goog.Promise'; // from //javascript/closure/promise
-import {assert, assertInstanceof} from 'google3/javascript/typescript/contrib/assert';
+
 /** Uncompressed file extracted from .tar */
 export interface UncompressedFile {
   name: string;
   buffer: ArrayBuffer;
 }
+
 const NAME_LENGTH = 100;
 const MODE_LENGTH = 8;
 const UID_LENGTH = 8;
@@ -49,9 +49,11 @@ const DEVMINOR_LENGTH = 8;
 const NAMEPREFIX_LENGTH = 155;
 const HEADER_SIZE = 512;
 const CACHE_SIZE = 500000000;
+
 function isValidName(fileName: string) {
   return (fileName !== '' && fileName !== '.');
 }
+
 /** Function that untars files from a stream. */
 export function untarBuffer(arrayBuffer: ArrayBuffer, tarfile: TarFile) {
   const tarFileStream = new UntarFileStream(arrayBuffer, tarfile);
@@ -61,6 +63,7 @@ export function untarBuffer(arrayBuffer: ArrayBuffer, tarfile: TarFile) {
   }
   return files;
 }
+
 /** Function that converts an octal value in a string to a decimal. */
 export function decodeOctal(value: string) {
   if (!isNaN(Number(value))) {
@@ -71,6 +74,7 @@ export function decodeOctal(value: string) {
     return 0;
   }
 }
+
 /** Function that creates a TarFile object from a stream. */
 export function makeTarFile(stream: UntarStream, validFileTypes: RegExp[]) {
   const name = stream.readString(NAME_LENGTH);
@@ -134,6 +138,7 @@ export function makeTarFile(stream: UntarStream, validFileTypes: RegExp[]) {
   };
   return tarfile;
 }
+
 /** Class that parses headers in pax format. */
 export class PaxHeader {
   constructor(public fields: Array<{name: string; value: string | number;}>) {}
@@ -142,6 +147,7 @@ export class PaxHeader {
     // An extended header shall consist of one or more records, each
     // constructed as follows:
     // "%d %s=%s\n", <length>, <keyword>, <value>
+
     // The extended header records shall be encoded according to the
     // ISO/IEC10646-1:2000 standard (UTF-8). The <length> field, <blank>,
     // equals sign, and <newline> shown shall be limited to the portable
@@ -149,8 +155,10 @@ export class PaxHeader {
     // can be any UTF-8 characters. The <length> field shall be the decimal
     // length of the extended header record in octets, including the trailing
     // <newline>.
+
     let bytes = new Uint8Array(buffer);
     const fields = [];
+
     while (bytes.length > 0) {
       // Decode bytes up to the first space character; that is the total field
       // length
@@ -159,16 +167,18 @@ export class PaxHeader {
           Number(decoder.decode(bytes.subarray(0, bytes.indexOf(0x20))));
       const fieldText = decoder.decode(bytes.subarray(0, fieldLength));
       const fieldMatch = fieldText.match(/^\d+ ([^=]+)=(.*)\n$/);
+
       if (fieldMatch === null) {
         throw new Error('Invalid PAX header data format.');
       }
+
       const fieldName = fieldMatch[1];
       const fieldValue = fieldMatch[2];
       let fieldNum = 0;
       if (fieldValue.length === 0) {
         fieldNum = 0;
       } else if (fieldValue.match(/^\d+$/) !== null) {
-        // If it's a integer field, parse it as int
+        // If it's an integer field, parse it as int
         fieldNum = Number(fieldValue);
       }
       let field = null;
@@ -178,21 +188,26 @@ export class PaxHeader {
         field = {name: fieldName, value: fieldValue};
       }
       fields.push(field);
+
       bytes = bytes.subarray(fieldLength);  // Cut off the parsed field data
     }
+
     return new PaxHeader(fields);
   }
   applyHeader(file: TarFile) {
     // Apply fields to the file
     // If a field is of value null, it should be deleted from the file
     // https://www.mkssoftware.com/docs/man4/pax.4.asp
+
     for (const field of this.fields) {
       let fieldName = field.name;
       const fieldValue: string|number = field.value;
+
       if (fieldName === 'path') {
         // This overrides the name and prefix fields in the following header
         // block.
         fieldName = 'name';
+
         if (file.prefix !== undefined) {
           delete file.prefix;
         }
@@ -210,6 +225,7 @@ export class PaxHeader {
     }
   }
 }
+
 /** Class that reads from file to be untarred. */
 export class UntarStream {
   bufferView: DataView;
@@ -221,7 +237,9 @@ export class UntarStream {
   readString(charCount: number) {
     const charSize = 1;
     const byteCount = charCount * charSize;
+
     const charCodes = [];
+
     for (let i = 0; i < charCount; ++i) {
       const charCode = this.bufferView.getUint8(this.position + (i * charSize));
       if (charCode !== 0) {
@@ -230,7 +248,9 @@ export class UntarStream {
         break;
       }
     }
+
     this.seek(byteCount);
+
     return String.fromCharCode.apply(null, charCodes);
   }
   readBuffer(byteCount: number) {
@@ -243,16 +263,20 @@ export class UntarStream {
   seek(byteCount: number) {
     this.position += byteCount;
   }
+
   peekUint32() {
     return this.bufferView.getUint32(this.position, true);
   }
+
   setPosition(newpos: number) {
     this.position = newpos;
   }
+
   size() {
     return this.bufferView.byteLength;
   }
 }
+
 /** Class that extracts files from UntarStream. */
 export class UntarFileStream {
   stream: UntarStream;
@@ -265,9 +289,11 @@ export class UntarFileStream {
     this.file = tarfile;
     this.uncompressedFile = {name: this.file.name, buffer: new ArrayBuffer(0)};
   }
+
   setUncompressedFile(file: {name: string, buffer: ArrayBuffer}) {
     this.uncompressedFile = file;
   }
+
   getUncompressedFile() {
     return this.uncompressedFile;
   }
@@ -284,15 +310,21 @@ export class UntarFileStream {
     const stream = this.stream;
     let isHeaderFile = false;
     let paxHeader = null;
+
     const dataBeginPos = stream.position;
     // Assert that this is a ustar tar file.
-    assert(this.file.ustarFormat.indexOf('ustar') > -1);
+    if (!(this.file.ustarFormat.indexOf('ustar') > -1)) {
+      throw new Error('file is not in ustar format');
+    }
     // Then we can safely read the contents of the file.
     this.file.buffer = stream.readBuffer(stream.size());
+
     if (this.file.namePrefix.length > 0) {
       this.file.name = this.file.namePrefix + '/' + this.file.name;
     }
+
     stream.setPosition(dataBeginPos);
+
     // Derived from https://www.mkssoftware.com/docs/man4/pax.4.asp
     // and
     // https://www.ibm.com/support/knowledgecenter/en/SSLTBW_2.3.0/com.ibm.zos.v2r3.bpxa500/pxarchfm.htm
@@ -304,12 +336,10 @@ export class UntarFileStream {
         this.file.buffer = stream.readBuffer(this.file.size);
         break;
       case '1':  // Link to another file already archived
-        // TODO Should we do anything with these?
         break;
       case '2':  // Symbolic link
-        // TODO Should we do anything with these?
         break;
-      case '3':  // Character special device (what does this mean??)
+      case '3':  // Character special device
         break;
       case '4':  // Block special device
         break;
@@ -332,22 +362,29 @@ export class UntarFileStream {
       default:  // Unknown file type
         break;
     }
+
     if (this.file.buffer === undefined) {
       this.file.buffer = new ArrayBuffer(0);
     }
+
     let dataEndPos = dataBeginPos + this.file.size;
+
     // File data is padded to reach a 512 byte boundary; skip the padded
     // bytes too.
     if (this.file.size % 512 !== 0) {
       dataEndPos += 512 - (this.file.size % 512);
     }
+
     stream.setPosition(dataEndPos);
+
     if (isHeaderFile) {
       this.readNextFile();
     }
+
     if (this.globalPaxHeader !== null) {
       this.globalPaxHeader.applyHeader(this.file);
     }
+
     if (paxHeader !== null) {
       paxHeader.applyHeader(this.file);
     }
@@ -358,6 +395,7 @@ export class UntarFileStream {
     return this.getUncompressedFile();
   }
 }
+
 /** Class that defines a tarred file object. */
 export interface TarFile {
   prefix: string;
@@ -380,6 +418,7 @@ export interface TarFile {
   namePrefix: string;
   buffer?: ArrayBuffer;
 }
+
 /** Class for calling FileReader, slicing the file, and untarring. */
 export class Tsunami {
   files: UncompressedFile[];
@@ -388,6 +427,7 @@ export class Tsunami {
   slice: Blob;
   buffer: ArrayBuffer;
   header: TarFile;
+
   constructor(
       readonly validFileTypes: RegExp[],
       readonly excludeInvalidFiles: boolean = false,
@@ -418,13 +458,15 @@ export class Tsunami {
       namePrefix: '',
     };
   }
+
   private readFileAsArrayBuffer(inputBlob: Blob) {
     const fileReader = new FileReader();
-    return new GoogPromise((resolve, reject) => {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
       fileReader.onerror = () => {
         fileReader.abort();
         reject();
       };
+
       fileReader.onload = () => {
         let buffer = new ArrayBuffer(0);
         if (fileReader.result instanceof ArrayBuffer) {
@@ -432,15 +474,18 @@ export class Tsunami {
         }
         resolve(buffer);
       };
+
       fileReader.readAsArrayBuffer(inputBlob);
     });
   }
+
   private readFileContents(inputBuffer: ArrayBuffer, tarfile: TarFile) {
     const newFiles = untarBuffer(inputBuffer, tarfile);
     for (const newFile of newFiles) {
       this.files.push(newFile);
     }
   }
+
   async untar(file: File) {
     const fileSize = file.size;
     let fileOffset = 0;
