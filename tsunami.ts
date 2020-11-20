@@ -49,6 +49,8 @@ const DEVMINOR_LENGTH = 8;
 const NAMEPREFIX_LENGTH = 155;
 const HEADER_SIZE = 512;
 const CACHE_SIZE = 500000000;
+const LONG_LINK_FILENAME = '././@LongLink';
+const LONG_LINK_HEADER = 'L';
 
 function isValidName(fileName: string) {
   return (fileName !== '' && fileName !== '.');
@@ -65,7 +67,7 @@ export function untarBuffer(arrayBuffer: ArrayBuffer, tarfile: TarFile) {
 }
 
 /** Function that converts an octal value in a string to a decimal. */
-export function decodeOctal(value: string) {
+function decodeOctal(value: string) {
   if (!isNaN(Number(value))) {
     // Needed to parse octal.
     // tslint:disable-next-line:ban
@@ -76,22 +78,25 @@ export function decodeOctal(value: string) {
 }
 
 /** Function that creates a TarFile object from a stream. */
-export function makeTarFile(stream: UntarStream, validFileTypes: RegExp[]) {
-  const name = stream.readString(NAME_LENGTH);
+function makeTarFile(
+    stream: UntarStream, validFileTypes: RegExp[],
+    activeLongLink: string|null) {
+  let name = stream.readString(NAME_LENGTH);
   const mode = stream.readString(MODE_LENGTH);
   const uid = decodeOctal(stream.readString(UID_LENGTH));
   const gid = decodeOctal(stream.readString(GID_LENGTH));
   const size = decodeOctal(stream.readString(SIZE_LENGTH));
   // The file will be padded with null bytes to fill a HEADER_SIZE block
   const paddedSize = Math.ceil(size / HEADER_SIZE) * HEADER_SIZE;
-  // This is a flag that determines whether the rest of the tar header should be
-  // read.
-  let continueRead = false;
-  for (const fileType of validFileTypes) {
-    if (fileType.test(name)) {
-      continueRead = true;
-    }
-  }
+  // If the previous file was a "long link" then it holds the file name for
+  // this file. Apply the full name before checking if we need a full read.
+  name = activeLongLink || name;
+  // Determines whether the rest of the tar header should be read. If it's the
+  // special "long link" we need to read the whole file since the contents are
+  // the file name of the next file.
+  let continueRead = name === LONG_LINK_FILENAME;
+  continueRead ||= validFileTypes.some(type => type.test(name));
+
   let mtime = 0;
   let checksum = 0;
   let type = '';
@@ -102,7 +107,7 @@ export function makeTarFile(stream: UntarStream, validFileTypes: RegExp[]) {
   let gname = '';
   let devmajor = 0;
   let devminor = 0;
-  let namePrefix = '';
+  let prefix = '';
   if (continueRead) {
     mtime = decodeOctal(stream.readString(MTIME_LENGTH));
     checksum = decodeOctal(stream.readString(CHECKSUM_LENGTH));
@@ -114,10 +119,10 @@ export function makeTarFile(stream: UntarStream, validFileTypes: RegExp[]) {
     gname = stream.readString(GNAME_LENGTH);
     devmajor = decodeOctal(stream.readString(DEVMAJOR_LENGTH));
     devminor = decodeOctal(stream.readString(DEVMINOR_LENGTH));
-    namePrefix = stream.readString(NAMEPREFIX_LENGTH);
+    prefix = stream.readString(NAMEPREFIX_LENGTH);
   }
   const tarfile: TarFile = {
-    prefix: '',
+    prefix,
     name,
     mode,
     uid,
@@ -134,7 +139,6 @@ export function makeTarFile(stream: UntarStream, validFileTypes: RegExp[]) {
     gname,
     devmajor,
     devminor,
-    namePrefix,
   };
   return tarfile;
 }
@@ -209,7 +213,7 @@ export class PaxHeader {
         fieldName = 'name';
 
         if (file.prefix !== undefined) {
-          delete file.prefix;
+          delete (file as any).prefix;
         }
       } else if (fieldName === 'linkpath') {
         // This overrides the linkname field in the following header block.
@@ -319,8 +323,8 @@ export class UntarFileStream {
     // Then we can safely read the contents of the file.
     this.file.buffer = stream.readBuffer(stream.size());
 
-    if (this.file.namePrefix.length > 0) {
-      this.file.name = this.file.namePrefix + '/' + this.file.name;
+    if (this.file.prefix.length > 0) {
+      this.file.name = this.file.prefix + '/' + this.file.name;
     }
 
     stream.setPosition(dataBeginPos);
@@ -331,8 +335,7 @@ export class UntarFileStream {
     switch (this.file.type) {
       case '0':  // Normal file is either "0" or "\0".
       case '':   // In case of "\0", readString returns an empty string, that
-                 // is
-                 // "".
+                 // is "".
         this.file.buffer = stream.readBuffer(this.file.size);
         break;
       case '1':  // Link to another file already archived
@@ -398,7 +401,6 @@ export class UntarFileStream {
 
 /** Class that defines a tarred file object. */
 export interface TarFile {
-  prefix: string;
   name: string;
   mode: string;
   uid: number;
@@ -415,7 +417,7 @@ export interface TarFile {
   gname: string;
   devmajor: number;
   devminor: number;
-  namePrefix: string;
+  prefix: string;
   buffer?: ArrayBuffer;
 }
 
@@ -455,7 +457,6 @@ export class Tsunami {
       gname: '',
       devmajor: 0,
       devminor: 0,
-      namePrefix: '',
     };
   }
 
@@ -490,6 +491,7 @@ export class Tsunami {
     const fileSize = file.size;
     let fileOffset = 0;
     let needsHeader = true;
+    let activeLongLink = null;
     while (fileOffset < file.size) {
       let cacheOffset = 0;
       // Read cache size amount at a time.
@@ -516,7 +518,11 @@ export class Tsunami {
           const headerBuffer =
               this.buffer.slice(cacheOffset, cacheOffset + HEADER_SIZE);
           const stream = new UntarStream(headerBuffer);
-          this.header = makeTarFile(stream, this.validFileTypes);
+          this.header =
+              makeTarFile(stream, this.validFileTypes, activeLongLink);
+          // A LongLink only applies to the file immediately following it, so we
+          // clear it after use
+          activeLongLink = null;
           cacheOffset += HEADER_SIZE;
         }
         needsHeader = true;
@@ -525,6 +531,16 @@ export class Tsunami {
         if (this.buffer.byteLength - cacheOffset < this.header.paddedSize) {
           needsHeader = false;
           break;
+        }
+        if (this.header.type === LONG_LINK_HEADER) {
+          const contentBuffer =
+              this.buffer.slice(cacheOffset, cacheOffset + this.header.size);
+          const files = untarBuffer(contentBuffer, this.header);
+          // A LongLink will only contain 1 file, which is the file name of the
+          // following file.
+          const decoded = new TextDecoder('utf-8').decode(files[0].buffer);
+          // LongLink has a terminator at the end we need to exclude.
+          activeLongLink = decoded.slice(0, -1);
         } else if (this.excludeInvalidFiles && isValidName(this.header.name)) {
           // This flag tracks whether the name should be included.
           let includeName = !this.validFileTypes.length;
