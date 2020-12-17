@@ -16,9 +16,10 @@ contents.
 
 An example of use case 2) would be the following:
 
+// Passing true will prevent file contents from being read/returned
 const tsunami = new Tsunami([/\.json/], true);
 await tsunami.untar(MyExampleFile);
-const fileNames = tsunami.fileNames;
+const fileNames = tsunami.files.map(f => f.name);
 
 In this case, the fileNames variable will hold an array of strings which are
 the names of the files within the tar archive.
