@@ -48,11 +48,11 @@ const DEVMAJOR_LENGTH = 8;
 const DEVMINOR_LENGTH = 8;
 const NAMEPREFIX_LENGTH = 155;
 const HEADER_SIZE = 512;
-const CACHE_SIZE = 500000000;
+const CACHE_SIZE = 512 * 1024;
 const LONG_LINK_FILENAME = '././@LongLink';
 
 function isValidName(fileName: string) {
-  return (fileName !== '' && fileName !== '.');
+  return (fileName !== '' && fileName !== '.' && fileName !== './');
 }
 
 /** Function that untars files from a stream. */
@@ -162,10 +162,9 @@ export class PaxHeader {
     while (bytes.length > 0) {
       // Decode bytes up to the first space character; that is the total field
       // length
-      const fieldLength = Number(
-          new TextDecoder().decode(bytes.subarray(0, bytes.indexOf(0x20))));
-      const fieldText =
-          new TextDecoder().decode(bytes.subarray(0, fieldLength));
+      const fieldLength =
+          Number(new TextDecoder().decode(bytes.subarray(0, bytes.indexOf(0x20))));
+      const fieldText = new TextDecoder().decode(bytes.subarray(0, fieldLength));
       const fieldMatch = fieldText.match(/^\d+ ([^=]+)=(.*)\n$/);
 
       if (fieldMatch === null) {
@@ -230,10 +229,8 @@ export class PaxHeader {
 /** Class that reads from file to be untarred. */
 export class UntarStream {
   bufferView: DataView;
-  position: number;
-  constructor(arrayBuffer: ArrayBuffer) {
+  constructor(arrayBuffer: ArrayBuffer, public position: number = 0) {
     this.bufferView = new DataView(arrayBuffer);
-    this.position = 0;
   }
   readString(charCount: number) {
     const charSize = 1;
@@ -344,18 +341,12 @@ export interface TarFile {
 /** Class for calling FileReader, slicing the file, and untarring. */
 export class Tsunami {
   files: UncompressedFile[];
-  cache: Blob;
-  slice: Blob;
-  buffer: ArrayBuffer;
 
   constructor(
       readonly validFileTypes: RegExp[],
       readonly excludeInvalidFiles: boolean = false,
       readonly cacheSize = CACHE_SIZE) {
     this.files = [];
-    this.cache = new Blob([]);
-    this.slice = new Blob([]);
-    this.buffer = new ArrayBuffer(0);
   }
 
   private readFileAsArrayBuffer(inputBlob: Blob) {
@@ -379,38 +370,30 @@ export class Tsunami {
   }
 
   async untar(file: File) {
-    const fileSize = file.size;
     let fileOffset = 0;
     let activeLongLink = null;
     let paxHeader = null;
     let globalPaxHeader = null;
     let header: TarFile|null = null;
+    let buffer = new ArrayBuffer(0);
     while (fileOffset < file.size) {
       let cacheOffset = 0;
-      // Read cache size amount at a time.
+      const unusedCache = buffer.byteLength;
+      let slice;
+      // Read cache size amount at a time, plus the unused section of the
+      // previous cache
       if (file.size - fileOffset >= this.cacheSize) {
-        this.slice = file.slice(fileOffset, fileOffset + this.cacheSize);
+        slice =
+            file.slice(fileOffset - unusedCache, fileOffset + this.cacheSize);
       } else {
-        this.slice = file.slice(fileOffset, file.size);
+        slice = file.slice(fileOffset - unusedCache, file.size);
       }
-      fileOffset += this.slice.size;
-      if (this.buffer.byteLength > 0) {
-        const buffer = await this.readFileAsArrayBuffer(this.slice);
-        const bufferLength: number = buffer.byteLength;
-        const mergeArrays =
-            new Uint8Array(this.buffer.byteLength + bufferLength);
-        mergeArrays.set(new Uint8Array(this.buffer), 0);
-        mergeArrays.set(new Uint8Array(buffer), this.buffer.byteLength);
-        this.buffer = mergeArrays.buffer;
-      } else {
-        this.cache = this.slice;
-        this.buffer = await this.readFileAsArrayBuffer(this.cache);
-      }
-      while (this.buffer.byteLength - cacheOffset >= HEADER_SIZE) {
+      fileOffset += slice.size - unusedCache;
+      buffer = await this.readFileAsArrayBuffer(slice);
+
+      while (buffer.byteLength - cacheOffset >= HEADER_SIZE) {
         if (!header) {
-          const headerBuffer =
-              this.buffer.slice(cacheOffset, cacheOffset + HEADER_SIZE);
-          const stream = new UntarStream(headerBuffer);
+          const stream = new UntarStream(buffer, cacheOffset);
           header = makeTarFile(
               stream, this.validFileTypes, activeLongLink, globalPaxHeader,
               paxHeader);
@@ -428,37 +411,55 @@ export class Tsunami {
           }
           cacheOffset += HEADER_SIZE;
         }
+        // if we don't have a header after trying to read one we're in the 0-padding at the end of the tar
+        if(!header) {
+          return;
+        }
+
+        // Special case: skipping file contents. We do this early so we can quickly jump to the next file header
+        const isRegularFile = ['', '0', '5'].includes(header.type);
+        const hasValidName = isValidName(header.name);
+        const isValidType = this.validFileTypes.some(type => type.test(header!.name));
+        if(isRegularFile && hasValidName) {
+          if(!isValidType) {
+            if (!this.excludeInvalidFiles) {
+              const newFile: UncompressedFile = {
+                name: header.name,
+                buffer: new ArrayBuffer(0)
+              };
+              this.files.push(newFile);
+            }
+
+            if (header.size > 0 && !isNaN(header.size)) {
+              cacheOffset += header.paddedSize;
+            }
+            header = null;
+            continue;
+          }
+        }
         // Make sure we don't jump past the end of the cache after
         // reading/skipping file contents
-        if (this.buffer.byteLength - cacheOffset < header.paddedSize) {
+        if (buffer.byteLength - cacheOffset < header.paddedSize) {
           break;
         }
-        if (header && isValidName(header.name)) {
-          const contentBuffer =
-              this.buffer.slice(cacheOffset, cacheOffset + header.size);
+        if (hasValidName) {
+          const contentBuffer = buffer.slice(cacheOffset, cacheOffset + header.size);
           switch (header.type) {
-            case 'g':  // global pax header
+            case 'g': // global pax header
               globalPaxHeader = PaxHeader.parse(contentBuffer);
               break;
-            case 'x':  // pax header
+            case 'x': // pax header
               paxHeader = PaxHeader.parse(contentBuffer);
               break;
-            case 'L':  // linux long link header
+            case 'L': // linux long link header
               const file = untarBuffer(contentBuffer, header);
               // LongLink has a terminator at the end we need to exclude.
-              activeLongLink =
-                  new TextDecoder().decode(file.buffer.slice(0, -1));
+              activeLongLink = new TextDecoder().decode(file.buffer.slice(0, -1));
               break;
             default:
               const headerName = header.name;
-              if (this.validFileTypes.some(type => type.test(headerName))) {
+              if (isValidType) {
                 this.files.push(untarBuffer(contentBuffer, header));
-              } else if (!this.excludeInvalidFiles) {
-                const newFile: UncompressedFile = {
-                  name: header.name,
-                  buffer: new ArrayBuffer(0)
-                };
-                this.files.push(newFile);
               }
           }
         }
@@ -467,8 +468,11 @@ export class Tsunami {
         }
         header = null;
       }
-      const buffer = this.buffer.slice(cacheOffset, this.buffer.byteLength);
-      this.buffer = buffer;
+      // If we passed the end of the cache by skipping a file, advance the fileOffset to compensate
+      if(cacheOffset > buffer.byteLength) {
+        fileOffset += (cacheOffset - buffer.byteLength);
+      }
+      buffer = buffer.slice(cacheOffset, buffer.byteLength);
     }
   }
 }
