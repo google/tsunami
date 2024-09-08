@@ -28,6 +28,7 @@
 /** Uncompressed file extracted from .tar */
 export interface UncompressedFile {
   name: string;
+  mode: number;
   buffer: ArrayBuffer;
 }
 
@@ -311,6 +312,7 @@ export class UntarFileStream {
 
     return {
       name: this.file.name,
+      mode: parseInt(this.file.mode, 8),
       buffer: this.file.buffer || new ArrayBuffer(0)
     };
   }
@@ -349,24 +351,8 @@ export class Tsunami {
     this.files = [];
   }
 
-  private readFileAsArrayBuffer(inputBlob: Blob) {
-    const fileReader = new FileReader();
-    return new Promise<ArrayBuffer>((resolve, reject) => {
-      fileReader.onerror = () => {
-        fileReader.abort();
-        reject();
-      };
-
-      fileReader.onload = () => {
-        let buffer = new ArrayBuffer(0);
-        if (fileReader.result instanceof ArrayBuffer) {
-          buffer = fileReader.result;
-        }
-        resolve(buffer);
-      };
-
-      fileReader.readAsArrayBuffer(inputBlob);
-    });
+  private async readFileAsArrayBuffer(inputBlob: Blob) {
+    return await new Response(inputBlob).arrayBuffer();
   }
 
   async untar(file: File) {
@@ -425,6 +411,7 @@ export class Tsunami {
             if (!this.excludeInvalidFiles) {
               const newFile: UncompressedFile = {
                 name: header.name,
+                mode: parseInt(header.mode, 8),
                 buffer: new ArrayBuffer(0)
               };
               this.files.push(newFile);
